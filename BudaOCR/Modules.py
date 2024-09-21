@@ -249,7 +249,6 @@ class CTCNetwork(ABC):
         self.model.load_state_dict(checkpoint['state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
 
-
     def export_onnx(self, out_dir: str, model_name: str = "model", opset: int = 17) -> None:
         self.model.eval()
 
@@ -459,7 +458,6 @@ class CRNNNetwork(CTCNetwork):
 
 
     def forward(self, data):
-        print(f"Data: {type(data)}")
         images, targets, target_lengths = [d.to(self.device) for d in data]
 
         logits = self.model(images)
@@ -473,15 +471,20 @@ class CRNNNetwork(CTCNetwork):
 
         return loss
     
-
-    def test(self, data):
+    def test(self, data_loader):
+        print("Running Test pass")
         self.model.eval()
-        images, targets, target_lengths = [d.to(self.device) for d in data]
+        data = next(iter(data_loader))
+        images, targets, target_lengths = data
+
+        images = images.to(self.device)
+        targets = targets.to(self.device)
+        target_lengths = target_lengths.to(self.device)
+        
         logits = self.model(images)
         logits = logits.cpu().detach().numpy()
-
         target_index = 0
-        sample_idx = random.randint(0, logits.shape[0]-1)
+        sample_idx = random.randint(0, logits.shape[1]-1)
 
         for b_idx, (logit, target_length) in enumerate(zip(logits, target_lengths)):
             if b_idx == sample_idx:
@@ -490,7 +493,7 @@ class CRNNNetwork(CTCNetwork):
 
                 return logit, gt_label
             target_index += target_length
-        
+
 
 class OCRTrainer:
     def __init__(
@@ -829,7 +832,7 @@ class OCRTrainer:
                         print("Training complete.")
                         return
                     
-                if check_cer: 
+                if check_cer:
                     test_logits, gt_label = self.network.test(self.test_loader)
                     gt_label = self.label_encoder.decode(gt_label)
                     prediction = self.label_encoder.ctc_decode(test_logits)
