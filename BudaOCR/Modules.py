@@ -401,6 +401,7 @@ class CRNNNetwork(CTCNetwork):
         image_width: int = 3200,
         image_height: int = 100,
         num_classes: int = 77,
+        rnn_type: str = "lstm",
         ctc_type: str = "default",
         ctc_reduction: str = "mean",
         learning_rate: float = 0.0005
@@ -411,6 +412,7 @@ class CRNNNetwork(CTCNetwork):
         self.image_width = image_width
         self.image_height = image_height
         self.num_classes = num_classes
+        self.rnn_type = rnn_type
         self.ctc_type = ctc_type
         self.ctc_reduction = ctc_reduction
         self.learning_rate = learning_rate
@@ -418,7 +420,8 @@ class CRNNNetwork(CTCNetwork):
         self.model = VanillaCRNN(
             img_width=self.image_width,
             img_height=self.image_height,
-            charset_size=self.num_classes
+            charset_size=self.num_classes,
+            rnn=self.rnn_type
         ).to(self.device)
 
         self.optimizer = torch.optim.Adam(
@@ -656,6 +659,8 @@ class OCRTrainer:
 
     def build_datasets(self):
         if self.preload_labels:
+
+            
             self.train_labels = [self.label_encoder.read_label(x) for x in self.train_labels]
             self.valid_labels = [self.label_encoder.read_label(x) for x in self.valid_labels]
             self.test_labels = [self.label_encoder.read_label(x) for x in self.test_labels]
