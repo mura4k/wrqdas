@@ -4,11 +4,10 @@ import torch
 import json
 import random
 import pyewts
-import logging
 from torch import nn
 from tqdm import tqdm
 from evaluate import load
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from datetime import datetime
 import torch.nn.functional as F
 from abc import ABC, abstractmethod
@@ -19,6 +18,7 @@ from BudaOCR.Models import Easter2, VanillaCRNN
 from BudaOCR.Augmentations import train_transform
 from BudaOCR.Utils import (
     create_dir,
+    split_dataset,
     binarize,
     preprocess_unicode,
     get_filename,
@@ -33,7 +33,8 @@ from pyctcdecode import build_ctcdecoder
 
 
 class LabelEncoder(ABC):
-    def __init__(self, charset: str | List[str]):
+    def __init__(self, charset: str | List[str], name: str):
+        self.name = name
         
         if isinstance(charset, str):
             self._charset = [x for x in charset]
@@ -69,7 +70,7 @@ class LabelEncoder(ABC):
 
 class StackEncoder(LabelEncoder):
     def __init__(self, charset: List[str]):
-        super().__init__(charset)
+        super().__init__(charset, "stack")
 
     def read_label(self, label_path: str, normalize: bool = True):
         f = open(label_path, "r", encoding="utf-8")
@@ -85,12 +86,12 @@ class StackEncoder(LabelEncoder):
         return stacks
     
     def num_classes(self) -> int:
-        return len(self._charset)+2
+        return len(self._charset)+1
 
 
 class WylieEncoder(LabelEncoder):
     def __init__(self, charset: str):
-        super().__init__(charset)
+        super().__init__(charset, "wylie")
         self.converter = pyewts.pyewts()
 
     def read_label(self, label_path: str):
@@ -196,13 +197,14 @@ class CTCNetwork(ABC):
         raise NotImplementedError
     
     @abstractmethod
-    def forward(self, data):
+    def forward(self, data: Tuple):
         raise NotImplementedError
 
     @abstractmethod
-    def test(self, data):
+    def test(self, data: Tuple, all_data: bool) -> Tuple[List, List]:
         raise NotImplementedError
     
+
     def evaluate(self, data_loader):
         val_ctc_losses = []
         self.model.eval()
@@ -267,7 +269,7 @@ class CTCNetwork(ABC):
             out_file,
             export_params=True,
             opset_version=opset,
-            verbose=True,
+            verbose=False,
             do_constant_folding=True,
             input_names=["input"],
             output_names=["output"],
@@ -324,14 +326,9 @@ class EasterNetwork(CTCNetwork):
     def get_input_shape(self):
         return [self.num_classes, self.image_height, self.image_width]
 
-    
+
     def fine_tune(self, checkpoint_path: str):
-        try:
-            self.checkpoint = torch.load(checkpoint_path)
-            self.model.load_state_dict(self.checkpoint["state_dict"])
-        
-        except BaseException as e:
-            print(f"Could not load the provided checkpoint: {e}")
+        self.load_checkpoint(checkpoint_path)
         
         trainable_layers = ["conv1d_5"]
 
@@ -368,30 +365,42 @@ class EasterNetwork(CTCNetwork):
         return loss
     
 
-    def test(self, data_loader):
+    def test(self, data, all_data: bool = False):
         self.model.eval()
 
-        data = next(iter(data_loader)) 
         images, targets, target_lengths = data
         images = torch.squeeze(images).to(self.device)
         targets = targets.to(self.device)
         target_lengths = target_lengths.to(self.device)
 
-        logits = self.model(images)
+        with torch.no_grad():
+            logits = self.model(images)
         logits = logits.permute(0, 2, 1)
         logits = logits.cpu().detach().numpy()
         
         target_index = 0
-        sample_idx = random.randint(0, logits.shape[0]-1)
+        if not all_data:
+            sample_idx = random.randint(0, logits.shape[0]-1)
 
-        for b_idx, (logit, target_length) in enumerate(zip(logits, target_lengths)):
-            if b_idx == sample_idx:
+            for b_idx, (logit, target_length) in enumerate(zip(logits, target_lengths)):
+                if b_idx == sample_idx:
+                    gt_label = targets[target_index:target_index+target_length+1]
+                    gt_label = gt_label.cpu().detach().numpy().tolist()
+
+                    return [logit], [gt_label]
+                target_index += target_length
+
+        else:
+            gt_labels = []
+
+            for _, (logit, target_length) in enumerate(zip(logits, target_lengths)):
                 gt_label = targets[target_index:target_index+target_length+1]
                 gt_label = gt_label.cpu().detach().numpy().tolist()
+                gt_labels.append(gt_label)
 
-                return logit, gt_label
-            target_index += target_length
+                target_index += target_length
 
+            return logits, gt_labels
 
 
 class CRNNNetwork(CTCNetwork):
@@ -440,13 +449,7 @@ class CRNNNetwork(CTCNetwork):
     
 
     def fine_tune(self, checkpoint_path: str):
-        print(f"CRNN Finetuning TBD")
-        try:
-            self.checkpoint = torch.load(checkpoint_path)
-            self.model.load_state_dict(self.checkpoint["state_dict"])
-        
-        except BaseException as e:
-            print(f"Could not load the provided checkpoint: {e}")
+        self.load_checkpoint(checkpoint_path)
 
         trainable_layers = ["conv_block_6"]
 
@@ -474,28 +477,46 @@ class CRNNNetwork(CTCNetwork):
 
         return loss
     
-    def test(self, data_loader):
-        print("Running Test pass")
+    def test(self, data: Tuple, all_data: bool = False):
         self.model.eval()
-        data = next(iter(data_loader))
+
         images, targets, target_lengths = data
 
         images = images.to(self.device)
         targets = targets.to(self.device)
         target_lengths = target_lengths.to(self.device)
         
-        logits = self.model(images)
+        with torch.no_grad():
+            logits = self.model(images)
+        
+        logits = logits.permute(1, 0, 2)
         logits = logits.cpu().detach().numpy()
+        targets = targets.cpu().detach().numpy()
+
         target_index = 0
-        sample_idx = random.randint(0, logits.shape[1]-1)
 
-        for b_idx, (logit, target_length) in enumerate(zip(logits, target_lengths)):
-            if b_idx == sample_idx:
+        if not all_data:
+            sample_idx = random.randint(0, logits.shape[0]-1)
+
+            for b_idx, (logit, target_length) in enumerate(zip(logits, target_lengths)):
+                if b_idx == sample_idx:
+                    gt_label = targets[target_index:target_index+target_length+1]
+                    gt_label = gt_label.tolist()
+
+                    return [logit], [gt_label]
+                target_index += target_length
+
+        else:
+            gt_labels = []
+
+            for _, (logit, target_length) in enumerate(zip(logits, target_lengths)):
                 gt_label = targets[target_index:target_index+target_length+1]
-                gt_label = gt_label.cpu().detach().numpy().tolist()
+                gt_label = gt_label.tolist()
+                gt_labels.append(gt_label)
 
-                return logit, gt_label
-            target_index += target_length
+                target_index += target_length
+
+            return logits, gt_labels
 
 
 class OCRTrainer:
@@ -624,20 +645,7 @@ class OCRTrainer:
     def init(self, image_paths: list[str], label_paths: list[str], train_split: float = 0.8, val_test_split: float = 0.5):
         images, labels = shuffle_data(image_paths, label_paths)
 
-        train_idx = int(len(images) * train_split)
-        self.train_images = images[:train_idx]
-        self.train_labels = labels[:train_idx]
-
-        val_test_imgs = images[train_idx:]
-        val_test_lbls = labels[train_idx:]
-
-        val_idx = int(len(val_test_imgs) * val_test_split)
-
-        self.valid_images = val_test_imgs[:val_idx]
-        self.valid_labels = val_test_lbls[:val_idx]
-
-        self.test_images = val_test_imgs[val_idx:]
-        self.test_labels = val_test_lbls[val_idx:]
+        self.train_images, self.train_labels, self.valid_images, self.valid_labels, self.test_images, self.test_labels = split_dataset(images, labels)
 
         print(
             f"Train Images: {len(self.train_images)}, Train Labels: {len(self.train_labels)}"
@@ -652,6 +660,14 @@ class OCRTrainer:
         self._save_dataset()
 
         self.build_datasets()
+
+
+        min_samples = min([len(self.train_images), len(self.train_images), len(self.test_images)])
+
+        if min_samples < self.batch_size:
+            self.batch_size = 8
+            print(f"Warning: Your data distribution contains samples < batch size, adjusting batch size to: {self.batch_size}")
+
         self.get_dataloaders()
 
         self.is_initialized = True
@@ -659,8 +675,6 @@ class OCRTrainer:
 
     def build_datasets(self):
         if self.preload_labels:
-
-            
             self.train_labels = [self.label_encoder.read_label(x) for x in self.train_labels]
             self.valid_labels = [self.label_encoder.read_label(x) for x in self.valid_labels]
             self.test_labels = [self.label_encoder.read_label(x) for x in self.test_labels]
@@ -714,7 +728,7 @@ class OCRTrainer:
         self.test_loader = DataLoader(
             dataset=self.test_dataset,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=False,
             collate_fn=ctc_collate_fn,
             drop_last=True,
             num_workers=self.workers,
@@ -729,7 +743,7 @@ class OCRTrainer:
             print("Done!")
 
         except BaseException as e:
-            logging.error(f"Failed to iterate over dataset: {e}")
+            print(f"Failed to iterate over dataset: {e}")
 
     def _save_checkpoint(self):
         chpt_file = os.path.join(self.output_dir, f"{self.model_name}.pth")
@@ -760,7 +774,9 @@ class OCRTrainer:
             "output_layer": "output",
             "squeeze_channel_dim": "yes" if self.network.architecture == "Easter2" else "no",
             "swap_hw": "no" if self.network.architecture == "Easter2" else "yes",
+            "encoder": self.label_encoder.name,
             "charset": self.label_encoder.charset
+            
         }
 
         json_out = json.dumps(network_config, ensure_ascii=False, indent=2)
@@ -838,10 +854,13 @@ class OCRTrainer:
                         return
                     
                 if check_cer:
-                    test_logits, gt_label = self.network.test(self.test_loader)
-                    gt_label = self.label_encoder.decode(gt_label)
-                    prediction = self.label_encoder.ctc_decode(test_logits)
+                    test_data = next(iter(self.test_loader))
+                    test_logits, gt_labels = self.network.test(test_data, all_data=False)
 
+                    # that is a bit hacky, if more than 1 result is returned accumualte the results
+                    gt_label = self.label_encoder.decode(gt_labels[0]) 
+                    prediction = self.label_encoder.ctc_decode(test_logits[0])
+        
                     if prediction != "":
                         cer_score = self.cer_scorer.compute(predictions=[prediction], references=[gt_label])
                         print(f"Label: {gt_label}")
@@ -849,6 +868,7 @@ class OCRTrainer:
                         print(f"CER: {cer_score}")
                         cer_score_history.append(cer_score)
                     else:
+                        print("CER: nan")
                         cer_score_history.append("nan")
          
                 if epoch > scheduler_start:
@@ -869,7 +889,29 @@ class OCRTrainer:
             print("Training complete.")
 
         else:
-            logging.error("Trainer was not initialized, you may want to call init() first on the trainer instance.")
+            print("Trainer was not initialized, you may want to call init() first on the trainer instance.")
+
+
+    def evaluate(self):
+        cer_scores = {}
+        test_sample_idx = 0 # keeps track of the global test data index to 
+
+        for _, data in tqdm(enumerate(self.test_loader), total=len(self.test_loader)):
+            test_logits, gt_labels = self.network.test(data, all_data=True)
+            
+            for logits, label in zip(test_logits, gt_labels):
+                gt_label = self.label_encoder.decode(label)
+                prediction = self.label_encoder.ctc_decode(logits)
+
+                cer_score = self.cer_scorer.compute(predictions=[prediction], references=[gt_label])
+                
+                test_sample = self.test_images[test_sample_idx]
+                test_sample_n = get_filename(test_sample)
+                cer_scores[test_sample_n] = cer_score
+
+                test_sample_idx += 1
+
+        return cer_scores
 
 
 class CustomCTC(nn.Module):
@@ -889,3 +931,49 @@ class CustomCTC(nn.Module):
         loss = self.alpha * (torch.pow((1 - p), self.gamma)) * ctc_loss
 
         return loss
+
+
+class ModelTester:
+    def __init__(self, network: CTCNetwork, encoder: LabelEncoder) -> None:
+        self.network = network
+        self.batch_size = 32
+        self.workers = 4
+        self.label_encoder = encoder
+        self.cer_scorer = load("cer")
+
+
+    def evaluate(self, test_dataset: CTCDataset, label_paths: str):
+
+        test_loader = DataLoader(
+            dataset=test_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            collate_fn=ctc_collate_fn,
+            drop_last=False,
+            num_workers=self.workers,
+            persistent_workers=True,
+        )
+
+        cer_scores = {}
+        test_sample_idx = 0 # keeps track of the global test data index to 
+        print(f"Running evaluation....")
+        
+        for idx, data in tqdm(enumerate(test_loader), total=len(test_loader)):
+
+            print(idx)
+            test_logits, gt_labels = self.network.test(data, all_data=True)
+            print(f"Check")
+            for logits, label in zip(test_logits, gt_labels):
+                print("OK....")
+                gt_label = self.label_encoder.decode(label)
+                prediction = self.label_encoder.ctc_decode(logits)
+
+                cer_score = self.cer_scorer.compute(predictions=[prediction], references=[gt_label])
+                print(cer_score)
+                test_sample = label_paths[test_sample_idx]
+                test_sample_n = get_filename(test_sample)
+                cer_scores[test_sample_n] = cer_score
+
+                test_sample_idx += 1
+
+        return cer_scores

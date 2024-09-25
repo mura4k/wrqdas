@@ -6,14 +6,13 @@ import logging
 import random
 import numpy as np
 from glob import glob
-from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from enum import Enum
-from typing import Tuple
 from pathlib import Path
 import numpy.typing as npt
 from natsort import natsorted
-from typing import List
+from typing import Dict, List, Tuple
+from sklearn.model_selection import train_test_split
 from botok import tokenize_in_stacks, normalize_unicode
 
 class Labelformat(Enum):
@@ -49,34 +48,44 @@ def read_stack_file(file_path: str) -> List[str]:
         return stacks
 
 
-def read_distribution(file_path: str):
-    if os.path.isfile(file_path):
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-            content = json.loads(content)
+def read_ocr_model_config(config_file: str):
+    model_dir = os.path.dirname(config_file)
+    file = open(config_file, encoding="utf-8")
+    json_content = json.loads(file.read())
 
-            if "train" in content and "validation" in content and "test" in content:
-                train_samples = content["train"]
-                valid_samples = content["validation"]
-                test_samples = content["test"]
-                return train_samples, valid_samples, test_samples
-            else:
-                logging.error("Data distribution is missing the required keys 'train' and 'validation' and 'test'.")
-                return None, None, None
+    checkpoint = f"{model_dir}/{json_content['checkpoint']}"
+    architecture = json_content["architecture"]
+    input_width = json_content["input_width"]
+    input_height = json_content["input_height"]
+    charset = json_content["charset"]
+    encoder = json_content["encoding"]
 
-    else:
-        logging.error(f"Specified distribution file does not exist: {file_path}")
-        return None, None, None
+    return checkpoint, architecture, encoder, input_width, input_height, charset
 
 
+def read_distribution(distribution_file: str):
+    with open(distribution_file, "r", encoding="utf-8") as f:
+        content = f.read()
+        content = json.loads(content)
 
-def build_data_paths(data_root: str) -> tuple[list[str], list[str]]:
+        if "train" in content and "validation" in content and "test" in content:
+            train_samples = content["train"]
+            valid_samples = content["validation"]
+            test_samples = content["test"]
+
+
+            return train_samples, valid_samples, test_samples
+        else:
+            logging.error("Data distribution is missing the required keys 'train' and 'validation' and 'test'.")
+            return None, None, None
+
+def build_data_paths(data_root: str) -> Tuple[list[str], List[str]]:
     _images = natsorted(glob(f"{data_root}/lines/*.jpg"))
     _labels = natsorted(glob(f"{data_root}/transcriptions/*.txt"))
 
     return _images, _labels
 
-def build_distribution_paths(data_path: str, samples: list[str]) -> tuple[list[str], list[str]]:
+def build_distribution_paths(data_path: str, samples: List[str]) -> Tuple[list[str], List[str]]:
     images = []
     labels = []
 
@@ -110,7 +119,7 @@ def assemble_data_paths(data_root: Path):
     return image_paths, label_paths
 
 
-def build_distribution_from_directory(data_dir: str):
+def build_distribution_from_directory(data_dir: str) -> Dict:
     data_path = Path(data_dir)
 
     all_train_images = []
@@ -130,7 +139,7 @@ def build_distribution_from_directory(data_dir: str):
             img_n = get_filename(img)
             lbl_n = get_filename(lbl)
 
-            assert(img_n == lbl_n)
+            assert (img_n == lbl_n)
 
         _images, _labels = shuffle_data(_images, _labels)
         train_images, train_labels, val_images, val_labels, test_images, test_labels = split_dataset(_images, _labels)
@@ -164,40 +173,106 @@ def build_distribution_from_directory(data_dir: str):
     distribution["test_images"] = all_test_images
     distribution["test_labels"] = all_test_labels
 
+    return distribution
+
+
+def accumulate_distributions(data_path: str, datasets: List[str]):
+    all_train_images = []
+    all_train_labels = []
+
+    all_val_images = []
+    all_val_labels = []
+
+    all_test_images = []
+    all_test_labels = []
+
+
+    for dataset in datasets:
+        sub_dir = os.path.join(data_path, dataset)
+        distr_file = f"{sub_dir}/data.distribution"
+
+        assert os.isdir(sub_dir)
+        assert os.path.isfile(distr_file)
+
+        train_samples, valid_samples, test_samples = read_distribution(distr_file)
+
+        train_images, train_labels = build_distribution_paths(sub_dir, train_samples)
+        val_images, val_labels = build_distribution_paths(sub_dir, valid_samples)
+        test_images, test_labels = build_distribution_paths(sub_dir, test_samples)
+
+
+        all_train_images.extend(train_images)
+        all_train_labels.extend(train_labels)
+
+        all_val_images.extend(val_images)
+        all_val_labels.extend(val_labels)
+
+        all_test_images.extend(test_images)
+        all_test_labels.extend(test_labels)
+
+    all_train_images, all_train_labels = shuffle_data(all_train_images, all_train_labels)
+    all_val_images, all_val_labels = shuffle_data(all_val_images, all_val_labels)
+    all_test_images, all_test_labels = shuffle_data(all_test_images, all_test_labels)
+
+    distribution = {}
+    distribution["train_images"] = all_train_images
+    distribution["train_labels"] = all_train_labels
+    distribution["valid_images"] = all_val_images
+    distribution["valid_labels"] = all_val_labels
+    distribution["test_images"] = all_test_images
+    distribution["test_labels"] = all_test_labels
+
+    return distribution
+
+
+def build_distribution_from_file(distribution_file: str, data_root: str) -> Dict:
+    train_samples, valid_samples, test_samples = read_distribution(distribution_file)
+
+    train_images, train_labels = build_distribution_paths(data_root, train_samples)
+    val_images, val_labels = build_distribution_paths(data_root, valid_samples)
+    test_images, test_labels = build_distribution_paths(data_root, test_samples)
+
+    distribution = {}
+    distribution["train_images"] = train_images
+    distribution["train_labels"] = train_labels
+    distribution["valid_images"] = val_images
+    distribution["valid_labels"] = val_labels
+    distribution["test_images"] = test_images
+    distribution["test_labels"] = test_labels
 
     return distribution
 
 
 def save_distribution(train_images: List[str], valid_images: List[str], test_images: List[str], output_dir: str):
-        assert(os.path.isdir(output_dir))
-        
-        out_file = os.path.join(output_dir, "data.distribution")
+    assert (os.path.isdir(output_dir))
+    
+    out_file = os.path.join(output_dir, "data.distribution")
 
-        distribution = {}
-        train_data = []
-        valid_data = []
-        test_data = []
+    distribution = {}
+    train_data = []
+    valid_data = []
+    test_data = []
 
-        for sample in train_images:
-            sample_name = get_filename(sample)
-            train_data.append(sample_name)
+    for sample in train_images:
+        sample_name = get_filename(sample)
+        train_data.append(sample_name)
 
-        for sample in valid_images:
-            sample_name = get_filename(sample)
-            valid_data.append(sample_name)
+    for sample in valid_images:
+        sample_name = get_filename(sample)
+        valid_data.append(sample_name)
 
-        for sample in test_images:
-            sample_name = get_filename(sample)
-            test_data.append(sample_name)
+    for sample in test_images:
+        sample_name = get_filename(sample)
+        test_data.append(sample_name)
 
-        distribution["train"] = train_data
-        distribution["validation"] = valid_data
-        distribution["test"] = test_data
+    distribution["train"] = train_data
+    distribution["validation"] = valid_data
+    distribution["test"] = test_data
 
-        with open(out_file, "w", encoding="UTF-8") as f:
-            json.dump(distribution, f, ensure_ascii=False, indent=1)
+    with open(out_file, "w", encoding="UTF-8") as f:
+        json.dump(distribution, f, ensure_ascii=False, indent=1)
 
-        print(f"Saved data distribution to: {out_file}")
+    print(f"Saved data distribution to: {out_file}")
 
 
 def split_dataset(images: List[str], labels: List[str], train_val_split: float = 0.2, val_test_split: float = 0.5, seed: int = 42):
@@ -214,30 +289,6 @@ def validate_split(images, labels):
 
         if not img_n == lbl_n:
             print(f"Mismatch: {img} vs. {lbl}")
-
-
-def get_train_data(summary_file: str, dataset_dir: str) -> tuple[list[str], list[str], list[str], list[str]]:
-    print(dataset_dir)
-    f = open(summary_file, "r", encoding="utf-8")
-    content = f.read()
-    json_data = json.loads(content)
-
-    train_images_file = json_data["train_images"]
-    valid_images_file = json_data["valid_images"]
-
-    f = open(train_images_file, "r")
-    train_image_names = f.readlines()
-    train_image_names = [x.strip() for x in train_image_names]
-    train_images = [f"{dataset_dir}/lines/{x}.jpg" for x in train_image_names]
-    train_labels = [f"{dataset_dir}/transcriptions/{x}.txt" for x in train_image_names]
-
-    f = open(valid_images_file, "r")
-    valid_image_names = f.readlines()
-    valid_image_names = [x.strip() for x in valid_image_names]
-    valid_images = [f"{dataset_dir}/lines/{x}.jpg" for x in valid_image_names]
-    valid_labels = [f"{dataset_dir}/transcriptions/{x}.txt" for x in valid_image_names]
-
-    return train_images, train_labels, valid_images, valid_labels
 
 
 def shuffle_data(images: list[str], labels: list[str]) -> Tuple[list[str], list[str]]:
@@ -487,7 +538,7 @@ def postprocess_wylie_label(label: str) -> str:
     label = label.replace("_", "")
     label = label.replace(" ", "§")  # specific encoding for the tsheg
 
-    label = re.sub(r"[\[(].*?[\])]", "", label)
+    #label = re.sub(r"[\[(].*?[\])]", "", label)
     return label
 
 

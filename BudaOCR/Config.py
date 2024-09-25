@@ -1,5 +1,5 @@
-DEFAULT_CHARSET = "!#%'`()+-./0123456789:=?@ADHIMNRSTUWXY[\\]_abcdefghijklmnoprstuwyz|~§&äüö<>;}"
-N_CHARSET = "!#%'°^$`()+-./0123456789:=?@ADHIMNRSTUWXY[\\]_abcdefghijklmnoprstuwyz|~§&äüö<>;}"
+CHARSET = "!#%'°^$`()+-./0123456789:=?@ADHIMNRSTUWXY[\\]_abcdefghijklmnoprstuwyz|~§&äüö<>;}"
+STACK_FILE = "tib-stacks.txt"
 
 # Tibetan character ranges
 CONSONANTS = '\u0F40-\u0F6C'  # ཀ-ཌ, ཎ-ཱ, ི-ུ, ཱུ-ཹ, ེ-ཻ, ོ-ཽ, ཾ-ཿ
