@@ -93,11 +93,12 @@ def build_distribution_paths(data_path: str, samples: List[str]) -> Tuple[list[s
         image = f"{data_path}/lines/{sample}.jpg"
         label = f"{data_path}/transcriptions/{sample}.txt"
 
-        assert os.path.isfile(image)
-        assert os.path.isfile(label)
+        if os.path.isfile(image) and os.path.isfile(label):
+            images.append(image)
+            labels.append(label)
 
-        images.append(image)
-        labels.append(label)
+        else:
+            print(f"Warning: image-label pair not found: {sample}")
 
     return images, labels
 
@@ -191,7 +192,7 @@ def accumulate_distributions(data_path: str, datasets: List[str]):
         sub_dir = os.path.join(data_path, dataset)
         distr_file = f"{sub_dir}/data.distribution"
 
-        assert os.isdir(sub_dir)
+        assert os.path.isdir(sub_dir)
         assert os.path.isfile(distr_file)
 
         train_samples, valid_samples, test_samples = read_distribution(distr_file)
@@ -516,6 +517,8 @@ def preprocess_unicode(label: str, full_bracket_removal: bool = False) -> str:
 
 def preprocess_wylie_label(label: str) -> str:
     label = label.replace("༈", "!")
+    label = label.replace("＠", "@")
+    label = label.replace("।", "|")
     label = label.replace("༅", "#")
     label = label.replace("|", "/")  # TODO: let sb. verify this choice is ok
     label = label.replace("/ /", "/_/")
@@ -533,9 +536,13 @@ def postprocess_wylie_label(label: str) -> str:
     label = label.replace("\\u0fd4", "#")
     label = label.replace("\\u0f00", "oM")
     label = label.replace("\\u0f7f", "}")
+    label = label.replace("＠", "@")
+    label = label.replace("।", "|")
     label = label.replace("*", " ")
     label = label.replace("  ", " ")
     label = label.replace("_", "")
+    label = label.replace("[", "")
+    label = label.replace("]", "")
     label = label.replace(" ", "§")  # specific encoding for the tsheg
 
     #label = re.sub(r"[\[(].*?[\])]", "", label)

@@ -86,7 +86,7 @@ if __name__ == "__main__":
     else:
         scheduler_start = epochs + 1 # effectively ignoring it
 
-    ocr_trainer.train(epochs=epochs, scheduler_start=scheduler_start, check_cer=CHECK_CER, export_onnx=True)
+    ocr_trainer.train(epochs=epochs, scheduler_start=scheduler_start, check_cer=CHECK_CER, export_onnx=True, silent=True)
 
     cer_scores = ocr_trainer.evaluate()
 

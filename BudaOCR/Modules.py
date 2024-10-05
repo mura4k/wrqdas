@@ -205,11 +205,11 @@ class CTCNetwork(ABC):
         raise NotImplementedError
     
 
-    def evaluate(self, data_loader):
+    def evaluate(self, data_loader, silent: bool):
         val_ctc_losses = []
         self.model.eval()
 
-        for _, data in tqdm(enumerate(data_loader), total=len(data_loader)):
+        for _, data in tqdm(enumerate(data_loader), total=len(data_loader), disable=silent):
             images, _, _ = [d.to(self.device) for d in data]
             with torch.no_grad():
                 loss = self.forward(data)
@@ -534,6 +534,7 @@ class OCRTrainer:
         model_name: str = "OCRModel",
         do_test_pass: bool = True,
         preload_labels: bool = False,
+        is_silent: bool = False
     ):
         self.network = network
         self.model_name = model_name
@@ -576,6 +577,7 @@ class OCRTrainer:
         self.test_loader = None
 
         self.is_initialized = False
+        self.is_silent = is_silent
 
         print(f"OCR-Trainer -> Architecture: {self.network.architecture}")
 
@@ -749,7 +751,9 @@ class OCRTrainer:
         chpt_file = os.path.join(self.output_dir, f"{self.model_name}.pth")
         checkpoint = self.network.get_checkpoint()
         torch.save(checkpoint, chpt_file)
-        print(f"Saved checkpoint to: {chpt_file}")
+        
+        if not self.is_silent:
+            print(f"Saved checkpoint to: {chpt_file}")
 
     def _save_history(self, history: dict):
         out_file = os.path.join(self.output_dir, "history.txt")
@@ -790,8 +794,9 @@ class OCRTrainer:
         self.network.load_checkpoint(checkpoint_path)
 
 
-    def train(self, epochs: int = 10, scheduler_start: int = 10, patience: int = 8, save_best: bool = True, check_cer: bool = False, export_onnx: bool = True):
+    def train(self, epochs: int = 10, scheduler_start: int = 10, patience: int = 8, check_cer: bool = False, export_onnx: bool = True, silent: bool = False):
         print("Training network....")
+        self.is_silent = silent
 
         if self.is_initialized:
             train_history = {}
@@ -803,25 +808,27 @@ class OCRTrainer:
             max_patience = patience
             current_patience = patience
 
-            for epoch in range(1, epochs + 1):
+            loop = tqdm(range(epochs))
+
+            for _, epoch in enumerate(loop):
                 epoch_train_loss = 0
                 tot_train_count = 0
 
-                for _, data in tqdm(
-                    enumerate(self.train_loader), total=len(self.train_loader)
-                ):
+                for _, data in tqdm(enumerate(self.train_loader), total=len(self.train_loader), disable=self.is_silent):
                     train_loss = self.network.train(data)
                     epoch_train_loss += train_loss
                     tot_train_count += self.batch_size
 
                 train_loss = epoch_train_loss / tot_train_count
-                print(f"Epoch {epoch} => Train-Loss: {train_loss}")
+                
+                if not self.is_silent:
+                    print(f"Epoch {epoch} => Train-Loss: {train_loss}")
                 train_loss_history.append(train_loss)
 
-                val_loss = self.network.evaluate(self.valid_loader)
-                print(
-                    f"Epoch {epoch} => Val-Loss: {val_loss}, Best-loss: {best_loss}"
-                )
+                val_loss = self.network.evaluate(self.valid_loader, self.is_silent)
+
+                if not self.is_silent:
+                    print(f"Epoch {epoch} => Val-Loss: {val_loss}, Best-loss: {best_loss}")
                 val_loss_history.append(val_loss)
 
                 if best_loss is None:
@@ -863,14 +870,20 @@ class OCRTrainer:
         
                     if prediction != "":
                         cer_score = self.cer_scorer.compute(predictions=[prediction], references=[gt_label])
-                        print(f"Label: {gt_label}")
-                        print(f"Prediction: {prediction}")
-                        print(f"CER: {cer_score}")
+
+                        if not self.is_silent:
+                            print(f"Label: {gt_label}")
+                            print(f"Prediction: {prediction}")
+                            print(f"CER: {cer_score}")
                         cer_score_history.append(cer_score)
                     else:
-                        print("CER: nan")
-                        cer_score_history.append("nan")
-         
+                        cer_score = "nan"
+                        cer_score_history.append(cer_score)
+                        if not self.is_silent:
+                            print(f"CER: {cer_score}")
+                        
+                loop.set_postfix(Epoch=f"{epoch}, Train Loss: {train_loss}, Val Loss: {val_loss}, Test CER: {cer_score}")
+
                 if epoch > scheduler_start:
                     self.scheduler.step()
 
@@ -894,7 +907,7 @@ class OCRTrainer:
 
     def evaluate(self):
         cer_scores = {}
-        test_sample_idx = 0 # keeps track of the global test data index to 
+        test_sample_idx = 0 # keeps track of the global test data index
 
         for _, data in tqdm(enumerate(self.test_loader), total=len(self.test_loader)):
             test_logits, gt_labels = self.network.test(data, all_data=True)
@@ -931,49 +944,3 @@ class CustomCTC(nn.Module):
         loss = self.alpha * (torch.pow((1 - p), self.gamma)) * ctc_loss
 
         return loss
-
-
-class ModelTester:
-    def __init__(self, network: CTCNetwork, encoder: LabelEncoder) -> None:
-        self.network = network
-        self.batch_size = 32
-        self.workers = 4
-        self.label_encoder = encoder
-        self.cer_scorer = load("cer")
-
-
-    def evaluate(self, test_dataset: CTCDataset, label_paths: str):
-
-        test_loader = DataLoader(
-            dataset=test_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            collate_fn=ctc_collate_fn,
-            drop_last=False,
-            num_workers=self.workers,
-            persistent_workers=True,
-        )
-
-        cer_scores = {}
-        test_sample_idx = 0 # keeps track of the global test data index to 
-        print(f"Running evaluation....")
-        
-        for idx, data in tqdm(enumerate(test_loader), total=len(test_loader)):
-
-            print(idx)
-            test_logits, gt_labels = self.network.test(data, all_data=True)
-            print(f"Check")
-            for logits, label in zip(test_logits, gt_labels):
-                print("OK....")
-                gt_label = self.label_encoder.decode(label)
-                prediction = self.label_encoder.ctc_decode(logits)
-
-                cer_score = self.cer_scorer.compute(predictions=[prediction], references=[gt_label])
-                print(cer_score)
-                test_sample = label_paths[test_sample_idx]
-                test_sample_n = get_filename(test_sample)
-                cer_scores[test_sample_n] = cer_score
-
-                test_sample_idx += 1
-
-        return cer_scores
