@@ -4,6 +4,7 @@ import cv2
 import json
 import logging
 import random
+from dataclasses import dataclass
 import numpy as np
 from glob import glob
 from tqdm import tqdm
@@ -15,6 +16,7 @@ from typing import Dict, List, Tuple
 from sklearn.model_selection import train_test_split
 from botok import tokenize_in_stacks, normalize_unicode
 
+
 class Labelformat(Enum):
     t_unicode = 0
     wylie = 1
@@ -22,6 +24,20 @@ class Labelformat(Enum):
 class TargetEncoding(Enum):
     stacks = 0,
     wyile = 1
+
+
+@dataclass
+class CTCModelConfig:
+    checkpoint: str
+    model_file: str
+    architecture: str
+    input_width: int
+    input_height: int
+    input_layer: str
+    output_layer: str
+    squeeze_channel: bool
+    swap_hw: bool
+    charset: List[str]
 
 
 def create_dir(dir_path: str) -> None:
@@ -78,6 +94,7 @@ def read_distribution(distribution_file: str):
         else:
             logging.error("Data distribution is missing the required keys 'train' and 'validation' and 'test'.")
             return None, None, None
+      
 
 def build_data_paths(data_root: str) -> Tuple[list[str], List[str]]:
     _images = natsorted(glob(f"{data_root}/lines/*.jpg"))
@@ -85,7 +102,8 @@ def build_data_paths(data_root: str) -> Tuple[list[str], List[str]]:
 
     return _images, _labels
 
-def build_distribution_paths(data_path: str, samples: List[str]) -> Tuple[list[str], List[str]]:
+
+def build_distribution_paths(data_path: str, samples: List[str]) -> Tuple[List[str], List[str]]:
     images = []
     labels = []
 
@@ -101,6 +119,7 @@ def build_distribution_paths(data_path: str, samples: List[str]) -> Tuple[list[s
             print(f"Warning: image-label pair not found: {sample}")
 
     return images, labels
+
 
 def assemble_data_paths(data_root: Path):
     assert (os.path.isdir(data_root))
@@ -120,6 +139,7 @@ def assemble_data_paths(data_root: Path):
     return image_paths, label_paths
 
 
+
 def build_distribution_from_directory(data_dir: str) -> Dict:
     data_path = Path(data_dir)
 
@@ -132,15 +152,35 @@ def build_distribution_from_directory(data_dir: str) -> Dict:
     all_test_labels = []
 
     for sub_dir in data_path.iterdir():
+        if sub_dir.name == "Output":
+            continue
+
         _images = natsorted(glob(f"{sub_dir}/lines/*.jpg"))
         _labels = natsorted(glob(f"{sub_dir}/transcriptions/*.txt"))
-        print(f"Images: {len(_images)}, Labels: {len(_labels)}")
+        print(f"{sub_dir.name} => Images: {len(_images)}, Labels: {len(_labels)}")
+        #_images = [x for x in _images if os.stat(x).st_size >= 3000]
+        #_labels = [x for x in _labels if os.stat(x).st_size != 0] 
+
+        if (len(_images) != len(_labels)):
+        
+            image_list = list(map(get_filename, _images))
+            labels_list = list(map(get_filename, _labels))
+
+            shared_list = list(set(image_list) & set(labels_list))
+
+            shared_images = [f"{sub_dir}/lines/{x}.jpg" for x in shared_list]
+            share_labels = [f"{sub_dir}/transcriptions/{x}.txt" for x in shared_list]
+
+            _images = shared_images
+            _labels = share_labels
 
         for _, (img, lbl) in tqdm(enumerate(zip(_images, _labels)), total=len(_images)):
+
             img_n = get_filename(img)
             lbl_n = get_filename(lbl)
 
-            assert (img_n == lbl_n)
+            if not img_n == lbl_n:
+                print(f"Warning: Label name mismatch: {img} => {lbl} ")
 
         _images, _labels = shuffle_data(_images, _labels)
         train_images, train_labels, val_images, val_labels, test_images, test_labels = split_dataset(_images, _labels)
@@ -502,6 +542,7 @@ def preprocess_unicode(label: str, full_bracket_removal: bool = False) -> str:
     label = label.replace("\uf8f0", " ")
     label = label.replace("", "")
     label = label.replace("\xa0", "")
+    label = label.replace("\x10", "")
     label = label.replace("\t", "")
     label = label.replace("\u200d", "")
     label = label.replace("\uf037", "")
@@ -582,3 +623,38 @@ def read_data(
                 images.append(image_path)
   
     return images, labels
+
+
+
+def read_ctc_model_config(config_file: str) -> CTCModelConfig:
+    model_dir = os.path.dirname(config_file)
+    file = open(config_file, encoding="utf-8")
+    json_content = json.loads(file.read())
+
+    checkpoint = f"{model_dir}/{json_content['checkpoint']}"
+    onnx_model_file = f"{model_dir}/{json_content['onnx-model']}"
+    architecture = json_content["architecture"]
+    input_width = json_content["input_width"]
+    input_height = json_content["input_height"]
+    input_layer = json_content["input_layer"]
+    output_layer = json_content["output_layer"]
+    squeeze_channel_dim = (
+        True if json_content["squeeze_channel_dim"] == "yes" else False
+    )
+    swap_hw = True if json_content["swap_hw"] == "yes" else False
+    characters = json_content["charset"]
+
+    config = CTCModelConfig(
+        checkpoint,
+        onnx_model_file,
+        architecture,
+        input_width,
+        input_height,
+        input_layer,
+        output_layer,
+        squeeze_channel_dim,
+        swap_hw,
+        characters,
+    )
+
+    return config

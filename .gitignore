@@ -163,5 +163,7 @@ cython_debug/
 .idea/
 Checkpoints
 Datasets
+Models
+Output
 Experimental
 DataProcessing.ipynb

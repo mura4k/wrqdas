@@ -7,15 +7,19 @@ import pyewts
 from torch import nn
 from tqdm import tqdm
 from evaluate import load
-from typing import List, Optional, Tuple
+
 from datetime import datetime
 import torch.nn.functional as F
 from abc import ABC, abstractmethod
+from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
+from typing import List, Optional, Tuple
 from albumentations.core.composition import Compose
 from botok import tokenize_in_stacks, normalize_unicode
 from BudaOCR.Models import Easter2, VanillaCRNN
 from BudaOCR.Augmentations import train_transform
+from pyctcdecode import build_ctcdecoder
+
 from BudaOCR.Utils import (
     create_dir,
     split_dataset,
@@ -27,10 +31,6 @@ from BudaOCR.Utils import (
     postprocess_wylie_label,
     preprocess_unicode
 )
-
-from torch.utils.data import Dataset
-from pyctcdecode import build_ctcdecoder
-
 
 class LabelEncoder(ABC):
     def __init__(self, charset: str | List[str], name: str):
@@ -59,7 +59,14 @@ class LabelEncoder(ABC):
         return len(self._charset)
 
     def encode(self, label: str):
-        return [self._charset.index(x)+1 for x in label]
+        enc_lbl = []
+        for x in label:
+            if x in self._charset:
+                enc_lbl.append(self._charset.index(x)+1)
+            else:
+                enc_lbl.append(-1)
+                print("WARNING: {x} not in charset")
+        return enc_lbl
 
     def decode(self, inputs: List[int]) -> str:
         return "".join(self._charset[x-1] for x in inputs)
@@ -130,7 +137,10 @@ class CTCDataset(Dataset):
         return len(self.images)
 
     def __getitem__(self, index):
-        image = cv2.imread(self.images[index])  # grayscale
+        image = cv2.imread(self.images[index])
+        if image is None:
+            print(f"error reading image: {self.images[index]}")
+              # grayscale
         image = binarize(image)
         
         if self.augmentations is not None:
@@ -204,7 +214,6 @@ class CTCNetwork(ABC):
     def test(self, data: Tuple, all_data: bool) -> Tuple[List, List]:
         raise NotImplementedError
     
-
     def evaluate(self, data_loader, silent: bool):
         val_ctc_losses = []
         self.model.eval()
@@ -343,6 +352,10 @@ class EasterNetwork(CTCNetwork):
                         param[1].data.requires_grad = True
 
         self.fine_tuning = True
+        
+
+    def load_model(self, checkpoint_path: str):
+        self.load_checkpoint(checkpoint_path)
 
     def forward(self, data):
         images, targets, target_lengths = data
@@ -677,9 +690,19 @@ class OCRTrainer:
 
     def build_datasets(self):
         if self.preload_labels:
-            self.train_labels = [self.label_encoder.read_label(x) for x in self.train_labels]
-            self.valid_labels = [self.label_encoder.read_label(x) for x in self.valid_labels]
-            self.test_labels = [self.label_encoder.read_label(x) for x in self.test_labels]
+
+            train_it = [k for k in self.train_labels]
+            self.train_labels  = [self.label_encoder.read_label(token) for token in tqdm(train_it)]
+
+            val_it = [k for k in self.valid_labels]
+            self.valid_labels  = [self.label_encoder.read_label(token) for token in tqdm(val_it)]
+
+            test_it = [k for k in self.test_labels]
+            self.test_labels  = [self.label_encoder.read_label(token) for token in tqdm(test_it)]
+
+            #self.train_labels = [self.label_encoder.read_label(x) for x in self.train_labels]
+            #self.valid_labels = [self.label_encoder.read_label(x) for x in self.valid_labels]
+            #self.test_labels = [self.label_encoder.read_label(x) for x in self.test_labels]
 
         self.train_dataset = CTCDataset(
             images=self.train_images,
@@ -927,20 +950,3 @@ class OCRTrainer:
         return cer_scores
 
 
-class CustomCTC(nn.Module):
-    def __init__(self, gamma: float = 0.5, alpha: float = 0.25, blank: int = 0, reduction: str = "sum", zero_infinity: bool = True):
-        super(CustomCTC, self).__init__()
-        self.gamma = gamma
-        self.alpha = alpha
-        self.blank = blank
-        self.reduction = reduction
-        self.zero_infinity = zero_infinity
-
-    def forward(self, log_probs, labels, input_lengths, target_lengths):
-        ctc_loss = nn.CTCLoss(blank=self.blank, reduction=self.reduction, zero_infinity=self.zero_infinity)(
-            log_probs, labels, input_lengths, target_lengths
-        )
-        p = torch.exp(-ctc_loss)
-        loss = self.alpha * (torch.pow((1 - p), self.gamma)) * ctc_loss
-
-        return loss
