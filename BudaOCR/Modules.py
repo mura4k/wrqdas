@@ -831,13 +831,11 @@ class OCRTrainer:
             max_patience = patience
             current_patience = patience
 
-            loop = tqdm(range(epochs))
-
-            for _, epoch in enumerate(loop):
+            for epoch in range(epochs):
                 epoch_train_loss = 0
                 tot_train_count = 0
 
-                for _, data in tqdm(enumerate(self.train_loader), total=len(self.train_loader), disable=self.is_silent):
+                for _, data in tqdm(enumerate(self.train_loader), total=len(self.train_loader)):
                     train_loss = self.network.train(data)
                     epoch_train_loss += train_loss
                     tot_train_count += self.batch_size
@@ -904,8 +902,6 @@ class OCRTrainer:
                         cer_score_history.append(cer_score)
                         if not self.is_silent:
                             print(f"CER: {cer_score}")
-                        
-                loop.set_postfix(Epoch=f"{epoch}, Train Loss: {train_loss}, Val Loss: {val_loss}, Test CER: {cer_score}")
 
                 if epoch > scheduler_start:
                     self.scheduler.step()
