@@ -185,6 +185,7 @@ def ctc_collate_fn2(batch):
 class CTCNetwork(ABC):
     def __init__(self, model: nn.Module, ctc_type: str = "default", architecture: str = "ocr_architecture", input_width: int = 2000, input_height: int = 80) -> None:
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        print(self.device)
         self.architecture = architecture
         self.image_height = input_height
         self.image_width = input_width
@@ -256,7 +257,7 @@ class CTCNetwork(ABC):
         return checkpoint
     
     def load_checkpoint(self, checkpoint_path: str):
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
         self.model.load_state_dict(checkpoint['state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
 
@@ -305,7 +306,7 @@ class EasterNetwork(CTCNetwork):
         self.image_height = image_height
         self.num_classes = num_classes
         self.mean_pooling = mean_pooling
-        self.device = "cuda"
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.ctc_type = ctc_type
         self.ctc_reduction = "mean" if ctc_reduction == "mean" else "sum"
         self.learning_rate = learning_rate
@@ -338,7 +339,7 @@ class EasterNetwork(CTCNetwork):
 
     def fine_tune(self, checkpoint_path: str):
         self.load_checkpoint(checkpoint_path)
-        
+
         trainable_layers = ["conv1d_5"]
 
         for param in self.model.named_parameters():
